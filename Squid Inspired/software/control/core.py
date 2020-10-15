@@ -745,3 +745,665 @@ class ImageDisplayWindow(QMainWindow):
 
         self.roi_bbox.emit(np.array([xmin, ymin, width, height]))
         # print('Sent bbox from ImageDisplay: {}'.format([xmin, ymin, width, height]))
+
+
+class AutoFocusController(QObject):
+    z_pos = Signal(float)
+    autofocusFinished = Signal()
+    image_to_display = Signal(np.ndarray)
+
+    def __init__(self,camera,navigationController,liveController):
+        QObject.__init__(self)
+        self.camera = camera
+        self.navigationController = navigationController
+        self.liveController = liveController
+        self.N = None
+        self.deltaZ = None
+        self.crop_width = AF.CROP_WIDTH
+        self.crop_height = AF.CROP_HEIGHT
+
+    def set_N(self,N):
+        self.N = N
+
+    def set_deltaZ(self,deltaZ_um):
+        self.deltaZ = deltaZ_um/1000
+
+    def set_crop(self,crop_width,height):
+        self.crop_width = crop_width
+        self.crop_height = crop_height
+
+    def autofocus(self):
+
+        # stop live
+        if self.liveController.is_live:
+            self.liveController.was_live_before_autofocus = True
+            self.liveController.stop_live()
+
+        # temporarily disable call back -> image does not go through streamHandler
+        if self.camera.callback_is_enabled:
+            self.camera.callback_was_enabled_before_autofocus = True
+            self.camera.stop_streaming()
+            self.camera.disable_callback()
+            self.camera.start_streaming() # @@@ to do: absorb stop/start streaming into enable/disable callback - add a flag is_streaming to the camera class
+        
+        # @@@ to add: increase gain, decrease exposure time
+        # @@@ can move the execution into a thread
+        focus_measure_vs_z = [0]*self.N
+        focus_measure_max = 0
+
+        z_af_offset = self.deltaZ*round(self.N/2)
+        self.navigationController.move_z(-z_af_offset)
+
+        steps_moved = 0
+        for i in range(self.N):
+            self.navigationController.move_z(self.deltaZ)
+            steps_moved = steps_moved + 1
+            self.liveController.turn_on_illumination()
+            self.camera.send_trigger()
+            image = self.camera.read_frame()
+            self.liveController.turn_off_illumination()
+            image = utils.crop_image(image,self.crop_width,self.crop_height)
+            self.image_to_display.emit(image)
+            QApplication.processEvents()
+            timestamp_0 = time.time() # @@@ to remove
+            focus_measure = utils.calculate_focus_measure(image)
+            timestamp_1 = time.time() # @@@ to remove
+            print('             calculating focus measure took ' + str(timestamp_1-timestamp_0) + ' second')
+            focus_measure_vs_z[i] = focus_measure
+            print(i,focus_measure)
+            focus_measure_max = max(focus_measure, focus_measure_max)
+            if focus_measure < focus_measure_max*AF.STOP_THRESHOLD:
+                break
+
+        idx_in_focus = focus_measure_vs_z.index(max(focus_measure_vs_z))
+        self.navigationController.move_z((idx_in_focus-steps_moved)*self.deltaZ)
+        if idx_in_focus == 0:
+            print('moved to the bottom end of the AF range')
+        if idx_in_focus == self.N-1:
+            print('moved to the top end of the AF range')
+
+        if self.camera.callback_was_enabled_before_autofocus:
+            self.camera.stop_streaming()
+            self.camera.enable_callback()
+            self.camera.start_streaming()
+            self.camera.callback_was_enabled_before_autofocus = False
+
+        if self.liveController.was_live_before_autofocus:
+            self.liveController.start_live()
+            self.liveController.was_live = False
+        
+        print('autofocus finished')
+        self.autofocusFinished.emit()
+
+class MultiPointController(QObject):
+
+    acquisitionFinished = Signal()
+    image_to_display = Signal(np.ndarray)
+
+    x_pos = Signal(float)
+    y_pos = Signal(float)
+    z_pos = Signal(float)
+
+    def __init__(self,camera,navigationController,liveController,autofocusController):
+        QObject.__init__(self)
+
+        self.camera = camera
+        self.navigationController = navigationController
+        self.liveController = liveController
+        self.autofocusController = autofocusController
+        self.NX = 1
+        self.NY = 1
+        self.NZ = 1
+        self.Nt = 1
+        self.deltaX = Acquisition.DX
+        self.deltaY = Acquisition.DY
+        self.deltaZ = Acquisition.DZ/1000
+        self.deltat = 0
+        self.do_bfdf = False
+        self.do_fluorescence = False
+        self.do_autofocus = False
+        self.crop_width = Acquisition.CROP_WIDTH
+        self.crop_height = Acquisition.CROP_HEIGHT
+        self.display_resolution_scaling = Acquisition.IMAGE_DISPLAY_SCALING_FACTOR
+        self.counter = 0
+        self.experiment_ID = None
+        self.base_path = None
+
+    def set_NX(self,N):
+        self.NX = N
+    def set_NY(self,N):
+        self.NY = N
+    def set_NZ(self,N):
+        self.NZ = N
+    def set_Nt(self,N):
+        self.Nt = N
+    def set_deltaX(self,delta):
+        self.deltaX = delta
+    def set_deltaY(self,delta):
+        self.deltaY = delta
+    def set_deltaZ(self,delta_um):
+        self.deltaZ = delta_um/1000
+    def set_deltat(self,delta):
+        self.deltat = delta
+    def set_bfdf_flag(self,flag):
+        self.do_bfdf = flag
+    def set_fluorescence_flag(self,flag):
+        self.do_fluorescence = flag
+    def set_af_flag(self,flag):
+        self.do_autofocus = flag
+
+    def set_crop(self,crop_width,crop_height):
+        self.crop_width = crop_width
+        self.crop_height = crop_height
+
+    def set_base_path(self,path):
+        self.base_path = path
+
+    def start_new_experiment(self,experiment_ID): # @@@ to do: change name to prepare_folder_for_new_experiment
+        # generate unique experiment ID
+        self.experiment_ID = experiment_ID + '_' + datetime.now().strftime('%y-%m-%d %H-%M-%S.%f')
+        self.recording_start_time = time.time()
+        # create a new folder
+        try:
+            os.mkdir(os.path.join(self.base_path,self.experiment_ID))
+        except:
+            pass
+        
+    def run_acquisition(self): # @@@ to do: change name to run_experiment
+        print('start multipoint')
+        print(str(self.Nt) + '_' + str(self.NX) + '_' + str(self.NY) + '_' + str(self.NZ))
+
+        self.time_point = 0
+        self.single_acquisition_in_progress = False
+        self.acquisitionTimer = QTimer()
+        self.acquisitionTimer.setInterval(self.deltat*1000)
+        self.acquisitionTimer.timeout.connect(self._on_acquisitionTimer_timeout)
+        self.acquisitionTimer.start()
+        self.acquisitionTimer.timeout.emit() # trigger the first acquisition
+
+    def _on_acquisitionTimer_timeout(self):
+        # check if the last single acquisition is ongoing
+        if self.single_acquisition_in_progress is True:
+            # skip time point if self.deltat is nonzero
+            if self.deltat > 0.1: # @@@ to do: make this more elegant - note that both self.deltat is not 0 and self.deltat is not .0 don't work
+                self.time_point = self.time_point + 1
+                # stop the timer if number of time points is equal to Nt (despite some time points may have been skipped)
+                if self.time_point >= self.Nt:
+                    self.acquisitionTimer.stop()
+                else:
+                    print('the last acquisition has not completed, skip time point ' + str(self.time_point))
+            return
+        # if not, run single acquisition
+        self._run_single_acquisition()
+
+    def _run_single_acquisition(self):           
+        self.single_acquisition_in_progress = True
+        self.FOV_counter = 0
+
+        print('multipoint acquisition - time point ' + str(self.time_point))
+
+        # stop live
+        if self.liveController.is_live:
+            self.liveController.was_live_before_multipoint = True
+            self.liveController.stop_live() # @@@ to do: also uncheck the live button
+
+        # disable callback
+        if self.camera.callback_is_enabled:
+            self.camera.callback_was_enabled_before_multipoint = True
+            self.camera.stop_streaming()
+            self.camera.disable_callback()
+            self.camera.start_streaming() # @@@ to do: absorb stop/start streaming into enable/disable callback - add a flag is_streaming to the camera class
+        
+        # do the multipoint acquisition
+
+        # for each time point, create a new folder
+        current_path = os.path.join(self.base_path,self.experiment_ID,str(self.time_point))
+        os.mkdir(current_path)
+
+        # along y
+        for i in range(self.NY):
+
+            # along x
+            for j in range(self.NX):
+
+                # z-stack
+                for k in range(self.NZ):
+
+                    # perform AF only if when not taking z stack
+                    if (self.NZ == 1) and (self.do_autofocus) and (self.FOV_counter%Acquisition.NUMBER_OF_FOVS_PER_AF==0):
+                        self.autofocusController.autofocus()
+
+                    file_ID = str(i) + '_' + str(j) + '_' + str(k)
+
+                    # take bf
+                    if self.do_bfdf:
+                        self.liveController.set_microscope_mode(MicroscopeMode.BFDF)
+                        self.liveController.turn_on_illumination()
+                        print('take bf image')
+                        self.camera.send_trigger() 
+                        image = self.camera.read_frame()
+                        self.liveController.turn_off_illumination()
+                        image = utils.crop_image(image,self.crop_width,self.crop_height)
+                        saving_path = os.path.join(current_path, file_ID + '_bf' + '.' + Acquisition.IMAGE_FORMAT)
+                        # self.image_to_display.emit(cv2.resize(image,(round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling)),cv2.INTER_LINEAR))
+                        self.image_to_display.emit(utils.crop_image(image,round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling)))
+                        if self.camera.is_color:
+                            image = cv2.cvtColor(image,cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(saving_path,image)
+                        QApplication.processEvents()
+
+                    # take fluorescence
+                    if self.do_fluorescence:
+                        self.liveController.set_microscope_mode(MicroscopeMode.FLUORESCENCE)
+                        self.liveController.turn_on_illumination()
+                        self.camera.send_trigger()
+                        image = self.camera.read_frame()
+                        print('take fluorescence image')
+                        self.liveController.turn_off_illumination()
+                        image = utils.crop_image(image,self.crop_width,self.crop_height)
+                        saving_path = os.path.join(current_path, file_ID + '_fluorescence' + '.' + Acquisition.IMAGE_FORMAT)
+                        self.image_to_display.emit(utils.crop_image(image,round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling)))
+                        # self.image_to_display.emit(cv2.resize(image,(round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling)),cv2.INTER_LINEAR))
+                        if self.camera.is_color:
+                            image = cv2.cvtColor(image,cv2.COLOR_RGB2BGR)                        
+                        cv2.imwrite(saving_path,image)                        
+                        QApplication.processEvents()
+                    
+                    if self.do_bfdf is not True and self.do_fluorescence is not True:
+                        QApplication.processEvents()
+
+                    # move z
+                    if k < self.NZ - 1:
+                        self.navigationController.move_z(self.deltaZ)
+                
+                # move z back
+                self.navigationController.move_z(-self.deltaZ*(self.NZ-1))
+
+                # update FOV counter
+                self.FOV_counter = self.FOV_counter + 1
+
+                # move x
+                if j < self.NX - 1:
+                    self.navigationController.move_x(self.deltaX)
+
+            # move x back
+            self.navigationController.move_x(-self.deltaX*(self.NX-1))
+
+            # move y
+            if i < self.NY - 1:
+                self.navigationController.move_y(self.deltaY)
+
+        # move y back
+        self.navigationController.move_y(-self.deltaY*(self.NY-1))
+                        
+        # re-enable callback
+        if self.camera.callback_was_enabled_before_multipoint:
+            self.camera.stop_streaming()
+            self.camera.enable_callback()
+            self.camera.start_streaming()
+            self.camera.callback_was_enabled_before_multipoint = False
+        
+        if self.liveController.was_live_before_multipoint:
+            self.liveController.start_live()
+            # emit acquisitionFinished signal
+            self.acquisitionFinished.emit()
+        
+        # update time_point for the next scheduled single acquisition (if any)
+        self.time_point = self.time_point + 1
+
+        if self.time_point >= self.Nt:
+            print('Multipoint acquisition finished')
+            if self.acquisitionTimer.isActive():
+                self.acquisitionTimer.stop()
+            self.acquisitionFinished.emit()
+
+        self.single_acquisition_in_progress = False
+
+
+
+
+class DishScanController(QObject):
+    acquisitionFinished = Signal()
+    image_to_display = Signal(np.ndarray)
+
+    x_pos = Signal(float)
+    y_pos = Signal(float)
+    z_pos = Signal(float)
+
+    def __init__(self,camera,navigationController,liveController,autofocusController):
+        QObject.__init__(self)
+
+        self.camera = camera
+        self.navigationController = navigationController
+        self.liveController = liveController
+        self.autofocusController = autofocusController
+
+        self.NX = 1  # this is the number of steps to be taken for each well in x direction
+        self.NY = 1  # this is the number of steps to be taken for each well in y direction
+        self.NZ = 1
+        self.Nt = 1
+        self.deltaX = DishAcquisition.WIDTHX
+        self.deltaY = DishAcquisition.WIDTHY
+        self.deltaZ = DishAcquisition.DZ/1000  #why divided by 1000, check, to convert it into microns
+        self.deltat = 0
+        self.FOVoverlap = DishAcquisition.OVERLAP
+
+        self.do_subsill = False
+        self.do_offnot = False
+        self.do_autofocus = False
+        self.do_scansave = False
+
+        self.crop_width = DishAcquisition.CROP_WIDTH
+        self.crop_height = DishAcquisition.CROP_HEIGHT
+        self.display_resolution_scaling = DishAcquisition.IMAGE_DISPLAY_SCALING_FACTOR
+        self.counter = 0
+        self.experiment_ID = None
+        self.base_path = None
+        self.home_coord = None ##### change this based on how you use the home coordinate value
+        self.dish_template = None  #initial template is none
+        self.well_ID_list = []  #initial setup as empty list for wells
+        self.well_labels = []
+        self.originPOS = [] #a list for coordinates for the origin of all the wells
+        self.posJump = [] #the jumps in position required to reach the origins of wells after starting from home position
+
+        #get scale factors for images being captures through camera in pizels per mm
+        self.scale_5x = TemplateDef.scale_5x_pxmm
+        self.scale_2x = TemplateDef.scale_2x_pxmm
+        self.scale_used = self.scale_5x  #change it based on the lens used
+        self.magnification = 5  #change to the magnification of the lens being used
+
+        self.frameSizeX = 0.5*DishAcquisition.WIDTHX/self.magnification
+        self.frameSizeY = 0.5*DishAcquisition.WIDTHY/self.magnification
+
+        # 9 pelco 50 mm dish template data, all values in cms
+        self.pelco_50_sz = TemplateDef.pelco_50_sz_mm  # in mm
+        self.pelco_50_sep = TemplateDef.pelco_50_sep_mm  # in mm #separation between walls of adjacent dishes
+
+
+    def set_subsill_flag(self,flag):
+        self.do_subsill = flag
+    def set_offnot_flag(self,flag):
+        self.do_offnot = flag
+    def set_af_flag(self,flag):
+        self.do_autofocus = flag
+    def set_scansave_flag(self,flag):
+        self.do_scansave = flag
+
+    def set_crop(self,crop_width,crop_height):
+        self.crop_width = crop_width
+        self.crop_height = crop_height
+
+    def set_base_path(self,path):
+        self.base_path = path
+
+# use the marking circle on the template to start the acquisition for the Pelco 9 50mm or for the 6 well plate.
+    def set_home(self,home):
+        self.home_coord = home
+        print(self.home_coord)
+
+    def set_period(self,period, loops):
+        self.deltat = period
+        self.Nt = loops
+        print(self.deltat, "seconds", self.Nt, "loops")
+
+    def set_template(self,template, ID_list):
+        self.dish_template = template
+        self.well_ID_list = ID_list
+        print(self.dish_template, self.well_ID_list)
+        if (self.dish_template == 0) :  #repeat this for all the scan templates
+            for ii in self.well_ID_list:
+                self.well_labels.append([(ii-1)%3, (ii-1)//3]) 
+            print(self.well_labels)
+
+            self.NX = int(40/(self.frameSizeX*self.FOVoverlap))-int(1/self.FOVoverlap-1)
+            self.NY = int(40/(self.frameSizeY*self.FOVoverlap))-int(1/self.FOVoverlap-1)
+            self.NZ = 1
+            self.deltaX = self.frameSizeX*self.FOVoverlap  #in mm
+            self.deltaY = self.frameSizeY*self.FOVoverlap  #in mm
+            self.deltaZ = DishAcquisition.DZ/1000  #why divided by 1000, check, to convert it into microns
+            originPOS_bank = [[2.0,2.0], [8.5,2.0], [15.0,2.0], [2.0, 8.5], [8.5, 8.5], [15.0, 8.5], [2.0, 15.0], [8.5,15.0], [15.0,15.0]]
+            
+            for ii in self.well_ID_list:
+                self.originPOS.append(originPOS_bank[ii-1]) 
+
+            self.posJump.append(self.originPOS[0])
+            for ii in range(1,len(self.well_ID_list)):
+                self.posJump.append([self.originPOS[ii][0] - self.originPOS[ii-1][0], self.originPOS[ii][1] - self.originPOS[ii-1][1]])
+
+            print(self.originPOS, self.posJump)
+
+        if (self.dish_template == 1) :  #repeat this for all the scan templates
+            for ii in self.well_ID_list:
+                self.well_labels.append([(ii-1)%3, (ii-1)//3])
+            print(self.well_labels)
+            # self.NX = N
+            # self.NY = N
+            # self.NZ = N
+            # self.Nt = N
+            # self.deltaX = delta
+            # self.deltaY = delta
+            # self.deltaZ= delta
+
+
+    def start_new_experiment(self,experiment_ID): # @@@ to do: change name to prepare_folder_for_new_experiment
+        # generate unique experiment ID
+        self.experiment_ID = experiment_ID + '_' + datetime.now().strftime('%Y-%m-%d %H-%M-%S.%f')
+        print(self.experiment_ID)
+        self.recording_start_time = time.time()
+        # create a new folder
+        try:
+            os.mkdir(os.path.join(self.base_path,self.experiment_ID))
+        except:
+            pass
+
+    def run_acquisition(self): # @@@ to do: change name to run_experiment
+        print('start dishscan')
+        print(str(self.Nt) + '_' + str(self.NX) + '_' + str(self.NY) + '_' + str(self.NZ))  #change the display tag based on the combo settings
+
+        self.time_point = 0
+        self.single_acquisition_in_progress = False
+        self.acquisitionTimer = QTimer()
+        self.acquisitionTimer.setInterval(self.deltat*1000)  # takes input in milliseconds
+        self.acquisitionTimer.timeout.connect(self._on_acquisitionTimer_timeout)                #how are multiple time points run using this?
+        self.acquisitionTimer.start()
+        self.acquisitionTimer.timeout.emit() # trigger the first acquisition
+
+    def _on_acquisitionTimer_timeout(self):
+        # check if the last single acquisition is ongoing
+        if self.single_acquisition_in_progress is True:
+            # skip time point if self.deltat is nonzero
+            if self.deltat > 0.1: # @@@ to do: make this more elegant - note that both self.deltat is not 0 and self.deltat is not .0 don't work
+                self.time_point = self.time_point + 1
+                # stop the timer if number of time points is equal to Nt (despite some time points may have been skipped)
+                if self.time_point >= self.Nt:
+                    self.acquisitionTimer.stop()
+                else:
+                    print('the last acquisition has not completed, skip time point ' + str(self.time_point))
+            return
+        # if not, run single acquisition
+        self._run_single_acquisition()
+
+    def _run_single_acquisition(self):
+        self.is_animal = False
+        self.animal_saved = False
+        self.cent_coord = []
+        self.single_acquisition_in_progress = True
+        self.FOV_counter = 0
+        self.shiftX = 0
+        self.shiftY = 0
+
+        print('dish scanning - time point' + str(self.time_point))
+
+        # stop live
+        if self.liveController.is_live:
+            self.liveController.was_live_before_multipoint = True
+            self.liveController.stop_live() # @@@ to do: also uncheck the live button
+
+        # disable callback
+        if self.camera.callback_is_enabled:
+            self.camera.callback_was_enabled_before_multipoint = True
+            self.camera.stop_streaming()
+            self.camera.disable_callback()
+            self.camera.start_streaming() # @@@ to do: absorb stop/start streaming into enable/disable callback - add a flag is_streaming to the camera class
+        
+        # do the multipoint acquisition
+
+        # for each time point, create a new folder
+        time_path = os.path.join(self.base_path,self.experiment_ID,str(self.time_point))
+        os.mkdir(time_path)
+
+        # shift to get to the camera on the center of the frame from the corner
+        self.navigationController.move_x(self.frameSizeX/2)
+        self.navigationController.move_y(self.frameSizeX/2)
+
+        # for parsing across well ids
+        ctr = 0
+        for ww in self.well_labels:
+            #for each well create a new folder
+            current_path = os.path.join(time_path,"well_"+str(ww[0]+1+ww[1]*3))
+            os.mkdir(current_path)
+            print(current_path,ww)
+            
+            #refresh the list to store the values of coordinates of tracked animals based on ww, i, j, k
+            coord_list = []
+                        
+            # write a function to go to the top left corner of the new well and then do a regular scan acquisition using NX and NY
+            self.navigationController.move_x(self.posJump[ctr][0])
+            self.navigationController.move_y(self.posJump[ctr][1])
+
+            # along y
+            for i in range(self.NY):
+
+                # along x
+                for j in range(self.NX):
+
+                    # z-stack
+                    for k in range(self.NZ):
+    
+                        # perform AF only if when not taking z stack
+                        if (self.NZ == 1) and (self.do_autofocus) and (self.FOV_counter%Acquisition.NUMBER_OF_FOVS_PER_AF==0):
+                            self.autofocusController.autofocus()
+    
+                        file_ID = str(i) + '_' + str(j) + '_' + str(k)
+    
+                        # take bf
+                        if self.do_subsill:
+                            self.liveController.set_microscope_mode(MicroscopeMode.BFDF)  #connect microcontroller to control the substrate illumination
+                            self.liveController.turn_on_illumination()
+                            #print('take bf image')
+                            self.camera.send_trigger()
+                            image = self.camera.read_frame()
+                            self.liveController.turn_off_illumination()
+                            image = utils.crop_image(image,self.crop_width,self.crop_height)
+                            saving_path = os.path.join(current_path, file_ID + '_subsill' + '.' + DishAcquisition.IMAGE_FORMAT)
+                            # self.image_to_display.emit(cv2.resize(image,(round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling)),cv2.INTER_LINEAR))
+                            self.image_to_display.emit(utils.crop_image(image,round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling)))
+                            if self.camera.is_color:
+                                image = cv2.cvtColor(image,cv2.COLOR_RGB2BGR)
+                            if self.do_scansave is False:
+                                cv2.imwrite(saving_path,image)
+                                print('saving image')
+                            else:
+                                t = time.time()
+                                self.is_animal, self.cent_coord = detection.detect_animal(image)
+                                #check if the animal has already been scanned, leave if already scanned
+                                self.animal_saved = detection.check_saved(self.cent_coord)
+                                # do stuff
+                                elapsed = time.time() - t
+                                print(elapsed, self.cent_coord)
+                                if (self.is_animal) and (not self.animal_saved):
+                                    #save halt location and get displacements necessary to get the center the animal in the frame  - move to the animal
+                                    self.shiftX = (int(self.cent_coord[0])-965)/self.scale_used
+                                    self.shiftY = (int(self.cent_coord[1])-965)/self.scale_used
+                                    self.navigationController.move_x(self.shiftX)
+                                    self.navigationController.move_y(self.shiftY)
+                                    
+                                    
+                                    self.liveController.turn_on_illumination()
+                                    print('taking image')
+                                    self.camera.send_trigger()
+                                    image = self.camera.read_frame()
+                                    self.liveController.turn_off_illumination()
+                                    image = utils.crop_image(image,self.crop_width,self.crop_height)
+                                    cv2.imwrite(saving_path,image)
+
+                                    #save the position of the animal relative to the center of the dish in a data array for the well
+                                    
+                                    
+                                    #return back to the original halt position
+                                    self.navigationController.move_y(-self.shiftY)
+                                    self.navigationController.move_x(-self.shiftX)
+                                else:
+                                    print('not taking image')
+                                    #continue scanning
+                                    
+                            QApplication.processEvents()
+                        
+                        if self.do_subsill is not True:
+                            QApplication.processEvents()
+    
+                        # move z
+                        if k < self.NZ - 1:
+                            self.navigationController.move_z(self.deltaZ)
+                    
+                    # move z back
+                    self.navigationController.move_z(-self.deltaZ*(self.NZ-1))
+    
+                    # update FOV counter
+                    self.FOV_counter = self.FOV_counter + 1
+    
+                    # move x
+                    if j < self.NX - 1:
+                        self.navigationController.move_x(self.deltaX)
+    
+                # move x back
+                self.navigationController.move_x(-self.deltaX*(self.NX-1))
+    
+                # move y
+                if i < self.NY - 1:
+                    self.navigationController.move_y(self.deltaY)
+    
+            # move y back
+            self.navigationController.move_y(-self.deltaY*(self.NY-1))
+            
+            #save the data for this well in a txt file
+            coord_array = np.array(coord_list)
+            
+            #reset FOV counter for a new well 
+            self.FOV_counter = 0
+            
+            ctr = ctr +1 
+
+        #reach back near home from where scanning was started
+        self.navigationController.move_x(-self.originPOS[ctr-1][0])
+        self.navigationController.move_y(-self.originPOS[ctr-1][1])
+
+        #reverse the shift from center of the frame to the corner
+        self.navigationController.move_x(-self.frameSizeX/2)
+        self.navigationController.move_y(-self.frameSizeX/2)
+
+        #reach the home position from where the scanning was started
+        
+        
+        # re-enable callback
+        if self.camera.callback_was_enabled_before_multipoint:
+            self.camera.stop_streaming()
+            self.camera.enable_callback()
+            self.camera.start_streaming()
+            self.camera.callback_was_enabled_before_multipoint = False
+        
+        if self.liveController.was_live_before_multipoint:
+            self.liveController.start_live()
+            # emit acquisitionFinished signal
+            self.acquisitionFinished.emit()
+        
+        # update time_point for the next scheduled single acquisition (if any)
+        self.time_point = self.time_point + 1
+
+        if self.time_point >= self.Nt:
+            print('Dish scanning finished')
+            if self.acquisitionTimer.isActive():
+                self.acquisitionTimer.stop()
+            self.acquisitionFinished.emit()
+
+        self.single_acquisition_in_progress = False

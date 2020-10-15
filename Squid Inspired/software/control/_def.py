@@ -34,8 +34,8 @@ class AF:
 
 # For Squid
 class Motion:
-    STEPS_PER_MM_XY = 1600 # microsteps
-    STEPS_PER_MM_Z = 5333  # microsteps
+    STEPS_PER_MM_XY = 50 # microsteps
+    STEPS_PER_MM_Z = 1600  # microsteps
     def __init__(self):
         pass
 
@@ -90,10 +90,10 @@ class Chamber:
 
 
 class Acquisition:
-    CROP_WIDTH = 3000
-    CROP_HEIGHT = 3000
+    CROP_WIDTH = 1930
+    CROP_HEIGHT = 1930
     NUMBER_OF_FOVS_PER_AF = 3
-    IMAGE_FORMAT = 'png'
+    IMAGE_FORMAT = 'tif'
     IMAGE_DISPLAY_SCALING_FACTOR = 0.25
     DX = 1
     DY = 1
@@ -101,6 +101,26 @@ class Acquisition:
 
     def __init__(self):
         pass
+
+class DishAcquisition:
+    CROP_WIDTH = 1930  #for getting edge width of 4mm at 5x magnification and 10mm at 2x magnification
+    CROP_HEIGHT = 1930
+    NUMBER_OF_FOVS_PER_AF = 3
+    IMAGE_FORMAT = 'tif'
+    IMAGE_DISPLAY_SCALING_FACTOR = 0.25
+    OVERLAP = 0.5  #fraction of frame to shift while scanning in one direction. 1/3 would enforce a shift of 1/3rd of each frame width.
+    WIDTHX = 40 #in mm, 0.5*40/5 = 4mm for 5x and 0.5*40/2 = 10mm for 2x
+    WIDTHY = 40 #in mm, 10mm for 2x #####make sure that these are correctly implemented in the hardware
+    DZ = 3 #in mm here, later converted into microns in the core code   #what are the units for these?
+
+    def __init__(self):
+        pass
+
+class TemplateDef:
+    scale_5x_pxmm = 482.5
+    scale_2x_pxmm = 193
+    pelco_50_sz_mm = 50
+    pelco_50_sep_mm = 15
 
 class Tracking:
     SEARCH_AREA_RATIO = 10
@@ -134,7 +154,7 @@ class PID_parameters:
 
     MAX_DISTANCE = 2 # Max distance (in mm) for truncating PID command
 
-    STEP_PER_MM_TYPICAL = 200
+    STEP_PER_MM_TYPICAL = 200  #Check correct value for this????
 
     PID_OUTPUT_MAX = MAX_DISTANCE*STEP_PER_MM_TYPICAL*Motors.MAX_MICROSTEPS
 
@@ -159,7 +179,8 @@ class PID_parameters:
 #         pass
 
 # Default saving location
-DEFAULT_SAVE_FOLDER = os.path.join(os.environ['HOME'], 'GravityMachine')
+#DEFAULT_SAVE_FOLDER = os.path.join(os.environ['HOME'], 'Squid')
+DEFAULT_SAVE_FOLDER = os.path.join('C:/Users/vpranav/Desktop', 'Squid')
 
 if(not os.path.exists(DEFAULT_SAVE_FOLDER)):
     os.makedirs(DEFAULT_SAVE_FOLDER)
@@ -167,7 +188,7 @@ if(not os.path.exists(DEFAULT_SAVE_FOLDER)):
 
 
 # Width of Image used for Pixel Size Calibration. 
-CALIB_IMG_WIDTH = 1920
+CALIB_IMG_WIDTH = 1930
 
 WORKING_RES_DEFAULT = 0.5
 
@@ -185,7 +206,7 @@ OBJECTIVES = {'4x':{'magnification':4, 'NA':0.13, 'PixelPermm':386}, '10x':{'mag
 DEFAULT_OBJECTIVE = '4x'
   
 
-CAMERAS = {'DF1':{'serial':"08910102", 'px_format':(1920,1080), 'color_format': 'GRAY8', 'fps': 120}}
+CAMERAS = {'DF1':{'serial':"08910102", 'px_format':(1930,1930), 'color_format': 'GRAY8', 'fps': 120}}
 
 OPTICAL_PATHS = {'DF only':['DF1'], 'DF+FL':['DF1', 'FL1'], 
             '2-camera':['DF1', 'DF2'], '2-camera-FL':['DF1', 'DF2', 'FL1']}

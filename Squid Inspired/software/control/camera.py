@@ -8,6 +8,8 @@ try:
 except:
     print('gxipy import error')
 
+
+
 class Camera(object):
 
     def __init__(self,sn=None):
