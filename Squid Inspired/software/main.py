@@ -16,7 +16,8 @@ from aqua.qsshelper import QSSHelper
 # app specific libraries
 #import control.gui as gui
 #import control.gui_2cameras_async as gui
-import control.gui_squid as gui
+#import control.gui_squid as gui
+import control.gui_cuttlefish as gui
 
 if __name__ == "__main__":
 

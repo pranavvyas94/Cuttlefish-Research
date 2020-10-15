@@ -82,6 +82,11 @@ class SquidGUI(QMainWindow):
 		self.trackingController = core_tracking.TrackingController(self.microcontroller,self.internal_state)
 		self.trackingDataSaver = core_tracking.TrackingDataSaver(self.internal_state)
 		self.microcontroller_Rec = core_tracking.microcontroller_Receiver(self.microcontroller, self.internal_state) # Microcontroller Receiver object
+
+		self.autofocusController = {key:core.AutoFocusController(self.camera[key],self.navigationController, self.liveController) for key in self.imaging_channels}
+		self.multipointController = {key:core.MultiPointController(self.camera[key],self.navigationController, self.liveController, self.autofocusController) for key in self.imaging_channels}
+		self.dishscanController = {key:core.DishScanController(self.camera[key],self.navigationController, self.liveController, self.autofocusController) for key in self.imaging_channels}
+
 		#-----------------------------------------------------------------------------------------------
 		# Define an ImageSaver, and Image Display object for each image stream
 		#-----------------------------------------------------------------------------------------------
@@ -106,6 +111,8 @@ class SquidGUI(QMainWindow):
 		self.PID_Group_Widget = widgets_tracking.PID_Group_Widget(self.trackingController)
 		self.FocusTracking_Widget = widgets_tracking.FocusTracking_Widget(self.trackingController, self.internal_state, self.microcontroller)
 		self.recordingControlWidget = widgets.RecordingWidget(self.streamHandler,self.imageSaver, self.internal_state, self.trackingControlWidget, self.trackingDataSaver, self.imaging_channels)
+#		self.multiPointWidget = widgets.MultiPointWidget(self.multipointController)
+		self.dishScanWidget = widgets.DishScanWidget(self.multipointController, self.dishscanController)
 
 		# self.recordTabWidget = QTabWidget()
 		# self.recordTabWidget.addTab(self.recordingControlWidget, "Acquisition control")
@@ -166,11 +173,13 @@ class SquidGUI(QMainWindow):
 		layout.addWidget(self.trackingControlWidget,1,0)
 		# layout.addWidget(self.PID_Group_Widget,2,0)
 		# layout.addWidget(self.navigationWidget,2,0)
-		#layout.addWidget(self.autofocusWidget,3,0)
+		layout.addWidget(self.autofocusWidget,3,0)
 		layout.addWidget(self.recordingControlWidget,1,1)
 		layout.addWidget(self.PID_Group_Widget,2,0)
-		# layout.addWidget(self.FocusTracking_Widget,2,0)
+		layout.addWidget(self.FocusTracking_Widget,2,0)
 		layout.addWidget(self.cameraSettings_Tab,1,2,1,1)
+#		layout.addwidget(self.multiPointWidget,2,2)
+		layout.addwidget(self.dishScanWidget,2,3)
 		# transfer the layout to the central widget
 		self.centralWidget = QWidget()
 		self.centralWidget.setLayout(layout)
