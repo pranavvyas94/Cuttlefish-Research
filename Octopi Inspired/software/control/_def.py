@@ -77,7 +77,7 @@ class MicrocontrollerDef:
     N_BYTES_POS = 3
 
 class TemplateDef:
-    scale_5x_pxmm = 482.5
-    scale_2x_pxmm = 193
+    scale_5x_pxmm = 479
+    scale_2x_pxmm = 191.6
     pelco_50_sz_mm = 50
     pelco_50_sep_mm = 15
