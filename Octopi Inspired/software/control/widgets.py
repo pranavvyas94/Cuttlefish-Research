@@ -535,7 +535,7 @@ class MultiPointWidget(QFrame):
         
         self.entry_NZ = QSpinBox()
         self.entry_NZ.setMinimum(1) 
-        self.entry_NZ.setMaximum(100) 
+        self.entry_NZ.setMaximum(500) 
         self.entry_NZ.setSingleStep(1)
         self.entry_NZ.setValue(1)
         
