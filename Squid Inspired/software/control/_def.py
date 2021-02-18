@@ -203,7 +203,7 @@ FocusTracking = {'Cropped image ratio':{'default':10}}
 
 OBJECTIVES = {'4x':{'magnification':4, 'NA':0.13, 'PixelPermm':386}, '10x':{'magnification':10, 'NA':0.25, 'PixelPermm':965}, '20x':{'magnification':20, 'NA':0.4, 'PixelPermm':1930}, '40x':{'magnification':40, 'NA':0.6,'PixelPermm':3860}}
 
-DEFAULT_OBJECTIVE = '4x'
+DEFAULT_OBJECTIVE = '10x'
   
 
 CAMERAS = {'DF1':{'serial':"08910102", 'px_format':(1930,1930), 'color_format': 'GRAY8', 'fps': 120}}
