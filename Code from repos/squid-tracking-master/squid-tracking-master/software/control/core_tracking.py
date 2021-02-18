@@ -260,7 +260,7 @@ class TrackingController(QObject):
 				for index, axis in enumerate(self.image_axis):
 		
 					x_error, y_error = self.units_converter.px_to_mm(self.posError_image[0], self.image_width), self.units_converter.px_to_mm(self.posError_image[1], self.image_width), 
-
+					y_error = -y_error
 					# print('Position error: {}, {} mm'.format(x_error, y_error))
 				# Flip the sign of Z-error since image coordinates and physical coordinates are reversed.
 				# z_error = -z_error
