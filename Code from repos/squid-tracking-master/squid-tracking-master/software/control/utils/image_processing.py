@@ -156,7 +156,7 @@ def find_centroid_basic(image):
 def find_centroid_basic_Rect(image):
     #find contour takes image with 8 bit int and only one channel
     #find contour looks for white object on a black back ground
-    # This finds the centroid with the maximum area in the current frame and alsio the bounding rectangle. - DK 2018_12_12
+    # This finds the centroid with the maximum area in the current frame and also the bounding rectangle. - DK 2018_12_12
     imH,imW = image.shape
     contours = cv2.findContours(image, cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)[-2]
     centroid=False
